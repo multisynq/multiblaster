@@ -2,7 +2,7 @@
     <head>
         <meta charset="utf-8">
         <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
-        <title>Croquet Multiblaster</title>
+        <title>Multisynq Multiblaster</title>
         <style>
             html, body {
                 margin: 0;
@@ -55,7 +55,7 @@
                 opacity: 100%;
             }
         </style>
-        <script src="https://cdn.jsdelivr.net/npm/@croquet/croquet@2.0.0-44/pub/croquet.min.js"></script>
+        <script src="https://cdn.jsdelivr.net/npm/@multisynq/client@1/bundled/multisynq-client.min.js"></script>
         <script type="module">
             import emoji_regex from "https://cdn.jsdelivr.net/npm/emoji-regex/index.mjs";
             window.EMOJI_REGEX = emoji_regex();
@@ -65,12 +65,12 @@
         <canvas id="canvas" width="1000" height="1000"></canvas>
         <div id="joystick"><div id="knob"></div></div>
         <input id="initials" type="text" maxlength="10" size="10" placeholder="Initials">
-        <a id="codelink" href="https://github.com/croquet/multiblaster/blob/main/index.html"
+        <a id="codelink" href="https://github.com/multisynq/multiblaster/blob/main/index.html"
             title="View source code on GitHub" target="_blank">{}</a>
         <script>
 /////////// Model code is executed inside of synced VM ///////////
 
-class Game extends Croquet.Model {
+class Game extends Multisynq.Model {
     init(_, persisted) {
         this.highscores = persisted?.highscores ?? {};
         this.ships = new Map();
@@ -132,7 +132,7 @@ class Game extends Croquet.Model {
 }
 Game.register("Game");
 
-class SpaceObject extends Croquet.Model {
+class SpaceObject extends Multisynq.Model {
     get game() { return this.wellKnownModel("modelRoot"); }
 
     move() {
@@ -338,7 +338,7 @@ Blast.register("Blast");
 /////////// Code below is executed outside of synced VM ///////////
 
 
-class Display extends Croquet.View {
+class Display extends Multisynq.View {
     constructor(model) {
         super(model);
         this.model = model;
@@ -422,10 +422,10 @@ class Display extends Croquet.View {
         initials.ontouchend = () => initials.focus(); // and allow input ¯\_(ツ)_/¯
         initials.onchange = () => {
             this.publish(this.viewId, "set-initials", initials.value);
-            localStorage.setItem("io.croquet.multiblaster.initials", initials.value);
+            localStorage.setItem("io.multisynq.multiblaster.initials", initials.value);
         }
-        if (localStorage.getItem("io.croquet.multiblaster.initials")) {
-            initials.value = localStorage.getItem("io.croquet.multiblaster.initials");
+        if (localStorage.getItem("io.multisynq.multiblaster.initials")) {
+            initials.value = localStorage.getItem("io.multisynq.multiblaster.initials");
             this.publish(this.viewId, "set-initials", initials.value);
             // after reloading, our previous ship with initials is still there, so just try again once
             setTimeout(() => this.publish(this.viewId, "set-initials", initials.value), 1000);
@@ -622,13 +622,11 @@ class Display extends Croquet.View {
     }
 }
 
-Croquet.App.makeWidgetDock(); // shows QR code
+Multisynq.App.makeWidgetDock(); // shows QR code
 
-Croquet.Session.join({
-    apiKey: '1_i65fcn11n7lhrb5n890hs3dhj11hfzfej57pvlrx', // get your own from croquet.io/keys
-    appId: 'io.croquet.multiblaster',
-    name: Croquet.App.autoSession(),
-    password: Croquet.App.autoPassword(),
+Multisynq.Session.join({
+    apiKey: '234567_Paste_Your_Own_API_Key_Here_7654321', // get your own from multisynq.io/coder
+    appId: 'io.multisynq.multiblaster',
     model: Game,
     view: Display,
 });
