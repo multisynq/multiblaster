@@ -2,7 +2,7 @@
     <head>
         <meta charset="utf-8">
         <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
-        <title>Multisynq Multiblaster</title>
+        <title>Multiblaster</title>
         <style>
             html, body {
                 margin: 0;
@@ -46,42 +46,83 @@
                 border: none; color: #000; text-align: center; font-size: 1.2em;
 
             }
-            #codelink {
-                position: fixed; bottom: 10px; right: 10px; padding: .5em; border-radius: 30px;
-                opacity: 50%; background: lightgray; box-shadow: 1px 1px 5px black;
-                text-decoration: none; font-family: monospace; font-size: 1.5em;
-            }
-            #codelink:hover, #initials:hover {
-                opacity: 100%;
-            }
         </style>
-        <script src="https://cdn.jsdelivr.net/npm/@multisynq/client@1/bundled/multisynq-client.min.js"></script>
-        <script type="module">
-            import emoji_regex from "https://cdn.jsdelivr.net/npm/emoji-regex/index.mjs";
-            window.EMOJI_REGEX = emoji_regex();
-        </script>
+        <script src="https://cdn.jsdelivr.net/npm/@multisynq/client@1.0.1/bundled/multisynq-client.min.js"></script>
     </head>
     <body>
         <canvas id="canvas" width="1000" height="1000"></canvas>
         <div id="joystick"><div id="knob"></div></div>
         <input id="initials" type="text" maxlength="10" size="10" placeholder="Initials">
-        <a id="codelink" href="https://github.com/multisynq/multiblaster/blob/main/index.html"
-            title="View source code on GitHub" target="_blank">{}</a>
         <script>
-/////////// Model code is executed inside of synced VM ///////////
+// We use a 2D canvas for rendering and Multisynq for multiplayer logic
+
+// Multisynq works by splitting the code into model and view:
+// * The model is the shared simulation state.
+// * The view is the interface between the simulation and the local client.
+
+// The model takes on the role of server code in traditional multiplayer
+// approaches. There is no need to implement any networking code or server-side code.
+
+// Model code execution is synchronized across all clients in the session
+// via Multisynq's synchronizer network, which feeds the exact same time
+// and sequence of user input events to all clients.
+// This ensures that all clients are executing the exact same code at the
+// exact same time, so the simulation is deterministic and consistent.
+// It also means that no state needs to be transmitted between clients, or
+// be sent from the server to the clients. Instead, you can run e.g. physics
+// or NPC code in the model, and it will be exactly the same for all clients.
+
+// All global constants used in the simulation must be defined as Multisynq.Constants
+// so that they get hashed into the session ID, ensuring that all clients
+// in the same session use the same constants
+const C = Multisynq.Constants;
+C.SHIP_ACCELERATION = 0.5;
+C.SHIP_TURN_SPEED = 0.2;
+C.SHIP_MAX_SPEED = 10;
+
+// Any Multisynq app must be split into model and view.
+// The model is the shared simulation state.
+// The view is the interface between the simulation and the local client.
+
+// The shared simulation model must be entirely self-contained
+// and not depend on any state outside of it.
+// This is to ensure that all clients have the same simulation state.
+
+// Additionally, all code executed in the model must be identical on all
+// clients. Multisynq ensures that by hashing the model code into the session ID.
+// If the model uses any external code, it must be added to Constants
+// to get hashed, too. For external libraries, it's ususally sufficient
+// to add their version number to Constants so if two clients have different
+// versions of the same library, they will be in different sessions.
+
+// The root model class is the entry point for the simulation.
+// It is created when the session is initially joined and is responsible for creating
+// all other models in the simulation.
+// It is also responsible for managing the simulation state and persisting it
+// across sessions. The model is created once and then shared across all clients.
+// The model is created with the `init` method, which is called when the session is joined.
+// You must not implement any logic in the constructor, because that would interfere with the
+// deserialization of the model state.
 
 class Game extends Multisynq.Model {
+    // No constructor, only init!
     init(_, persisted) {
         this.highscores = persisted?.highscores ?? {};
         this.ships = new Map();
         this.asteroids = new Set();
         this.blasts = new Set();
+        // these events are published automatically when a view joins or exits
+        // and are scoped to the session ID (a predefined property)
         this.subscribe(this.sessionId, "view-join", this.viewJoined);
         this.subscribe(this.sessionId, "view-exit", this.viewExited);
+        // Create models using the `create` method, not "new"
         Asteroid.create({});
+        // kick off the main loop
         this.mainLoop();
     }
 
+    // create a new ship for every player that joins the session
+    // the viewId is a unique identifier for each player in the session
     viewJoined(viewId) {
         const ship = Ship.create({ viewId });
         this.ships.set(viewId, ship);
@@ -93,12 +134,24 @@ class Game extends Multisynq.Model {
         ship.destroy();
     }
 
+    // Persistent highscore storage
+    // the session is snapshotted automatically by Multisynq
+    // so new players can join and leave at any time
+    // But when the code changes, the session ID changes and only the
+    // explicitly persisted state is used to initialize the new session
+    // (and passed to the init method of the root model)
     setHighscore(initials, score) {
         if (this.highscores[initials] >= score) return;
         this.highscores[initials] = score;
         this.persistSession({ highscores: this.highscores });
     }
 
+    // The main loop calls itself every 50ms using the `future` mechanism
+    // This is a special Multisynq function that schedules a function to be called
+    // in the future, under control of Multisynq rather than the browser.
+    // Future calls are synchronized across all clients in the session
+    // and are executed in the same order on all clients. They are stored as
+    // part of the snapshot just like subscriptions.
     mainLoop() {
         for (const ship of this.ships.values()) ship.move();
         for (const asteroid of this.asteroids) asteroid.move();
@@ -107,6 +160,8 @@ class Game extends Multisynq.Model {
         this.future(50).mainLoop(); // move & check every 50 ms
     }
 
+    // check for collisions between asteroids, ships and blasts
+    // note that this is a naive O(n^2) algorithm which is fine for this game
     checkCollisions() {
         for (const asteroid of this.asteroids) {
             if (asteroid.wasHit) continue;
@@ -132,13 +187,27 @@ class Game extends Multisynq.Model {
 }
 Game.register("Game");
 
+// SpaceObject is a base class for all objects in the game.
+// It provides basic properties and methods for moving and rotating objects.
+
 class SpaceObject extends Multisynq.Model {
+    // the root model is the game itself and well-known as "modelRoot"
     get game() { return this.wellKnownModel("modelRoot"); }
+
+    init() {
+        this.x = 0;
+        this.y = 0;
+        this.a = 0;
+        this.dx = 0;
+        this.dy = 0;
+        this.da = 0;
+    }
 
     move() {
         // drift through space
         this.x += this.dx;
         this.y += this.dy;
+        this.a += this.da;
         if (this.x < 0) this.x += 1000;
         if (this.x > 1000) this.x -= 1000;
         if (this.y < 0) this.y += 1000;
@@ -148,6 +217,11 @@ class SpaceObject extends Multisynq.Model {
     }
 }
 
+// each player has a ship and can control it via published events
+// with the scope of the player's viewId. Each ship subscribes to
+// the events published by a different viewId, so the ship can be controlled
+// by the player that owns it. The ship is created when the player joins
+// the session and destroyed when the player leaves.
 class Ship extends SpaceObject {
     init({ viewId }) {
         super.init();
@@ -162,6 +236,8 @@ class Ship extends SpaceObject {
     }
 
     reset() {
+        // Multisynq patches Math.random() to be deterministic if executed in the model
+        // (i.e. the same sequence of random numbers is generated on all clients)
         this.x = 480 + 40 * Math.random();
         this.y = 480 + 40 * Math.random();
         this.a = -Math.PI / 2;
@@ -195,7 +271,7 @@ class Ship extends SpaceObject {
         const y = this.y + dy;
         Blast.create({ x, y, dx, dy, ship: this });
         // kick ship back a bit
-        this.accelerate(-0.5);
+        this.accelerate(-C.SHIP_ACCELERATION);
     }
 
     move() {
@@ -204,16 +280,16 @@ class Ship extends SpaceObject {
             if (++this.wasHit > 60) this.reset();
         } else {
             // process thruster controls
-            if (this.forward) this.accelerate(0.5);
-            if (this.left) this.a -= 0.2;
-            if (this.right) this.a += 0.2;
+            if (this.forward) this.accelerate(C.SHIP_ACCELERATION);
+            if (this.left) this.a -= C.SHIP_TURN_SPEED;
+            if (this.right) this.a += C.SHIP_TURN_SPEED;
         }
        super.move();
     }
 
-    accelerate(force) {
-        this.dx += Math.cos(this.a) * force;
-        this.dy += Math.sin(this.a) * force;
+    accelerate(acceleration) {
+        this.dx += Math.cos(this.a) * acceleration;
+        this.dy += Math.sin(this.a) * acceleration;
         if (this.dx > 10) this.dx = 10;
         if (this.dx < -10) this.dx = -10;
         if (this.dy > 10) this.dy = 10;
@@ -243,6 +319,12 @@ class Ship extends SpaceObject {
     }
 }
 Ship.register("Ship");
+
+// Asteroids are created by the game model and move around randomly.
+// They are destroyed when they are hit by a blast or when they
+// are hit by a ship. When they are hit, they split into two smaller
+// asteroids that move faster and are harder to hit. When they are
+// small enough, they turn into debris and are destroyed.
 
 class Asteroid extends SpaceObject {
     init({ size, x, y, a, dx, dy, da }) {
@@ -276,17 +358,16 @@ class Asteroid extends SpaceObject {
         if (this.wasHit) {
             // keep drifting as debris, larger pieces drift longer
             if (++this.wasHit > this.size) return this.destroy();
-        } else {
-            // spin
-            this.a += this.da;
         }
         super.move();
     }
 
     hitBy(blast) {
-        if (!blast.ship.wasHit) blast.ship.scored();
+        blast.ship.scored();
         if (this.size > 20) {
             // split into two smaller faster asteroids
+            // by changing this asteroid's size, speed and direction
+            // and creating a new one moving in the opposite direction
             this.size *= 0.7;
             this.da *= 1.5;
             this.dx = -blast.dy * 10 / this.size;
@@ -309,6 +390,9 @@ class Asteroid extends SpaceObject {
 }
 Asteroid.register("Asteroid");
 
+// Blasts are created by the ship when it fires its blaster.
+// They move in the direction of the ship and disappear after 1.5 seconds.
+// They are also destroyed when they hit an asteroid.
 class Blast extends SpaceObject {
     init({x, y, dx, dy, ship}) {
         super.init();
@@ -323,7 +407,11 @@ class Blast extends SpaceObject {
 
     move() {
         // move for 1.5 second before disappearing
-        if (++this.t > 30) return this.destroy();
+        this.t++;
+        if (this.t > 30) {
+            this.destroy();
+            return;
+        }
         super.move();
     }
 
@@ -337,6 +425,10 @@ Blast.register("Blast");
 
 /////////// Code below is executed outside of synced VM ///////////
 
+// We use a Multisynq View as the Interface between shared simulation and local
+// renderer. We can read state directly from the simulation model, but
+// must not modify it. Any manipulation of the simulation state must be via
+// `publish` operations to ensure it stays synchronized across all clients
 
 class Display extends Multisynq.View {
     constructor(model) {
@@ -346,6 +438,11 @@ class Display extends Multisynq.View {
         const joystick = document.getElementById("joystick");
         const knob = document.getElementById("knob");
 
+        // we use a very economical control scheme that only publishes
+        // events when the user presses or releases a key to toggle thrusters
+        // or shoot the blaster.
+        // We use this view's auto-assigned viewId to scope the events to this player
+        // and "our" ship model uses the viewId to subscribe to "our" events
         document.onkeydown = (e) => {
             joystick.style.display = "none";
             if (e.repeat) return;
@@ -365,9 +462,10 @@ class Display extends Multisynq.View {
             }
         };
 
-        let x = 0, y = 0, id = null, right = false, left = false, forward = false;
+        // on-screen joystick generates the same events as the keyboard
+        let x = 0, y = 0, id = 0, right = false, left = false, forward = false;
         document.onpointerdown = (e) => {
-            if (id === null) {
+            if (!id) {
                 id = e.pointerId;
                 x = e.clientX;
                 y = e.clientY;
@@ -401,7 +499,7 @@ class Display extends Multisynq.View {
         document.onpointerup = (e) => {
             e.preventDefault();
             if (id === e.pointerId) {
-                id = null;
+                id = 0;
                 if (!right && !left && !forward) {
                     this.publish(this.viewId, "fire-blaster");
                 }
@@ -417,12 +515,14 @@ class Display extends Multisynq.View {
         document.onpointercancel = document.onpointerup;
         document.oncontextmenu = e => { e.preventDefault();  this.publish(this.viewId, "fire-blaster"); }
         document.ontouchend = e => e.preventDefault(); // prevent double-tap zoom on iOS
-        codelink.ontouchend = () => codelink.click(); // but allow clicking link ¯\_(ツ)_/¯
 
+        // the initials input field is used to set the player's initials
+        // which we keep in local storage and use to identify the player
+        // the initials are used to display the player's score in the highscore list
         initials.ontouchend = () => initials.focus(); // and allow input ¯\_(ツ)_/¯
         initials.onchange = () => {
-            this.publish(this.viewId, "set-initials", initials.value);
             localStorage.setItem("io.multisynq.multiblaster.initials", initials.value);
+            this.publish(this.viewId, "set-initials", initials.value);
         }
         if (localStorage.getItem("io.multisynq.multiblaster.initials")) {
             initials.value = localStorage.getItem("io.multisynq.multiblaster.initials");
@@ -439,11 +539,36 @@ class Display extends Multisynq.View {
 
         this.smoothing = new WeakMap(); // position cache for interpolated rendering
 
-        this.context = canvas.getContext("2d");
+        this.context = canvas.getContext("2d"); // our rendering context
+
+        // in many apps we would subscribe to events published by the model here, e.g.
+        // this.subscribe(this.model.id, "score-changed", this.updateScore);
+        // but in this app we render the whole scene every frame, so we don't need to
+        // subscribe to anything. The model is only used to get the current state of the game.
     }
 
-    // update is called once per render frame
-    // read from shared model, interpolate, render
+    // detach is called when the session is interrupted before the view is destroyed
+    // we need to manually release all resources this class created and
+    // unsubscribe from DOM events etc. because on reconnect, the whole view will be recreated
+    detach() {
+        super.detach();
+        document.onkeydown = null;
+        document.onkeyup = null;
+        document.onpointerdown = null;
+        document.onpointermove = null;
+        document.onpointerup = null;
+        document.onpointercancel = null;
+        document.oncontextmenu = null;
+        // document.ontouchend = null; // leave this one alone, it prevents double-tap zoom on iOS
+        initials.onchange = null;
+        initials.onkeydown = null;
+        initials.ontouchend = null;
+    }
+
+    // update is called by Multisynq once per render frame for the root view
+    // it reads from the shared model, interpolates between frames, and renders
+    // we use a 1000x1000 2D canvas to render the game in a simple line drawing style
+    // the canvas is cleared and redrawn every frame
     update() {
         this.context.clearRect(0, 0, 1000, 1000);
         this.context.fillStyle = "rgba(255, 255, 255, 0.5)";
@@ -455,15 +580,11 @@ class Display extends Multisynq.View {
         // model highscore only keeps players with initials, merge with unnamed players
         const highscore = Object.entries(this.model.highscores);
         const labels = new Map();
-        const emojis = new Map();
         for (const ship of this.model.ships.values()) {
             let label = ship.initials;
             if (!label) {
                 label = `Player ${labels.size + 1}`;
                 highscore.push([label, ship.score]);
-            } else if (window.EMOJI_REGEX) {
-                const emoji = label.match(EMOJI_REGEX);
-                if (emoji?.length) emojis.set(ship, emoji[emoji.length >> 1]);
             }
             labels.set(ship, label);
         }
@@ -471,7 +592,7 @@ class Display extends Multisynq.View {
         for (const [i, [label, score]] of highscore.sort((a, b) => b[1] - a[1]).entries()) {
             this.context.fillText(`${i + 1}. ${label}: ${score}`, 10, 30 + i * 35);
         }
-        // draw ships, asteroids, and blasters
+        // draw ships, asteroids, and blasts
         this.context.font = "40px sans-serif";
         for (const ship of this.model.ships.values()) {
             const { x, y, a } = this.smoothPosAndAngle(ship);
@@ -485,29 +606,25 @@ class Display extends Multisynq.View {
                 else this.drawShip(ship, ship.viewId === this.viewId);
             });
         }
-        this.context.textAlign = "center";
-        this.context.fillStyle = "white";
         for (const asteroid of this.model.asteroids) {
             const { x, y, a } = this.smoothPosAndAngle(asteroid);
             this.drawWrapped(x, y, 60, () => {
-                if (asteroid.wasHit && emojis.get(asteroid.ship)) {
-                    this.context.font = `${asteroid.wasHit * 4}px sans-serif`;
-                    this.context.fillText(emojis.get(asteroid.ship), 0, 0);
-                }
                 this.context.rotate(a);
                 if (asteroid.wasHit) this.drawAsteroidDebris(asteroid.size, asteroid.wasHit * 2);
                 else this.drawAsteroid(asteroid.size);
             });
         }
-        this.context.font = "20px sans-serif";
         for (const blast of this.model.blasts) {
             const { x, y } = this.smoothPos(blast);
-            this.drawWrapped(x, y, 10, () => {
-                this.drawBlast(emojis.get(blast.ship));
+            this.drawWrapped(x, y, 5, () => {
+                this.drawBlast();
             });
         }
     }
 
+    // the view remembers the last position an object was rendered at
+    // and uses linear interpolation to smoothly animate the object
+    // if the distance is too large, it snaps the object instead
     smoothPos(obj) {
         if (!this.smoothing.has(obj)) {
             this.smoothing.set(obj, { x: obj.x, y: obj.y, a: obj.a });
@@ -520,6 +637,7 @@ class Display extends Multisynq.View {
         return smoothed;
     }
 
+    // same for the angle
     smoothPosAndAngle(obj) {
         const smoothed = this.smoothPos(obj);
         const da = obj.a - smoothed.a;
@@ -527,6 +645,7 @@ class Display extends Multisynq.View {
         return smoothed;
     }
 
+    // draw an object on both sides of a screen edge if necessary
     drawWrapped(x, y, size, draw) {
         const drawIt = (x, y) => {
             this.context.save();
@@ -610,25 +729,33 @@ class Display extends Multisynq.View {
         this.context.stroke();
     }
 
-    drawBlast(emoji=null) {
-        if (emoji) {
-            this.context.fillText(emoji, 0, 0);
-        } else {
-            this.context.beginPath();
-            this.context.ellipse(0, 0, 2, 2, 0, 0, 2 * Math.PI);
-            this.context.closePath();
-            this.context.stroke();
-        }
+    drawBlast() {
+        this.context.beginPath();
+        this.context.ellipse(0, 0, 2, 2, 0, 0, 2 * Math.PI);
+        this.context.closePath();
+        this.context.stroke();
     }
 }
 
-Multisynq.App.makeWidgetDock(); // shows QR code
+// The widget dock shows a QR code for the session
+// URL so other players can join easily. Also, on shift+click
+// it shows a stats page with debug info.
+Multisynq.App.makeWidgetDock(); // creates a div with id="croquet_dock"
 
+// This is the main entry point for the application
+// it joins the session, resumes the simulation, and attaches the view to it
+// The Multisynq API key here is a placeholder that will work on the local network
+// but not on the public internet. Before deploying your own game, please create
+// your own API key at multisynq.io/coder and use that instead.
 Multisynq.Session.join({
-    apiKey: '234567_Paste_Your_Own_API_Key_Here_7654321', // get your own from multisynq.io/coder
-    appId: 'io.multisynq.multiblaster',
-    model: Game,
-    view: Display,
+    apiKey: '234567_Paste_Your_Own_API_Key_Here_7654321', // from multisynq.io/coder
+    appId: 'io.multisynq.multiblaster-tutorial',          // choose an appId. No need to version it since code hashes are used for versioning
+    model: Game, // the root model class
+    view: Display, // the root view class
+    // normally, a random session is created and the URL + QR code reflects that
+    // uncomment the following two lines to force a specific named session without changing the URL
+    // name: "my-session-name",             // e.g. "public"
+    // password: "my-session-password",     // e.g. "none"
 });
         </script>
     </body>
